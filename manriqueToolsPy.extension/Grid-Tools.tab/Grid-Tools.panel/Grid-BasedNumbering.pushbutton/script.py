@@ -45,48 +45,67 @@ class GridHelper(object):
         return None
 
     @staticmethod
-    def EnsureParameterExists(doc, paramName, catSet):
-        """
-        Ensures that a shared text parameter with name paramName exists and is bound to the categories in catSet.
-        If already bound, does nothing.
-        """
-        bindings = doc.ParameterBindings
-        iter_binding = bindings.ForwardIterator()
-        while iter_binding.MoveNext():
-            definition = iter_binding.Key
-            if definition and definition.Name.lower() == paramName.lower():
-                # Parameter already exists; no need to add.
+    def ensure_parameter_exists(doc, param_name, cat_set):
+        with Transaction(doc, f"Ensure Parameter {param_name}") as t:
+            t.Start()
+
+            app = doc.Application
+
+            # Open the shared parameter file
+            def_file = app.OpenSharedParameterFile()
+            if not def_file:
+                TaskDialog.Show("Error", "No shared parameter file is defined. Please set one in Revit Options.")
+                t.RollBack()
                 return
 
-        app = doc.Application
-        defFile = app.OpenSharedParameterFile()
-        if defFile is None:
-            TaskDialog.Show("Error", "No shared parameter file is defined. Please set one in Revit Options.")
-            return
+            # Get or create the group "ManriqueBimTools"
+            group = def_file.Groups.Item["ManriqueBimTools"] or def_file.Groups.Create("ManriqueBimTools")
 
-        group = defFile.Groups.get_Item("ManriqueBimTools")
-        if group is None:
-            group = defFile.Groups.Create("ManriqueBimTools")
+            # Check if the parameter exists in the shared parameter group
+            definition = None
+            for defn in group.Definitions:
+                if defn.Name.lower() == param_name.lower():
+                    definition = defn
+                    break
 
-        # Check if a definition with the same name already exists in the group.
-        definition = None
-        for defn in group.Definitions:
-            if defn.Name.lower() == paramName.lower():
-                definition = defn
-                break
+            # If no existing definition was found, create a new one
+            if definition is None:
+                options = ExternalDefinitionCreationOptions(param_name, "Autodesk.Revit.DB.SpecTypeId.String.Text")
+                options.Visible = True
+                definition = group.Definitions.Create(options)
 
-        if definition is None:
-            # Note: In Revit 2023, use SpecTypeId.String for a text parameter.
-            options = ExternalDefinitionCreationOptions(paramName, SpecTypeId.String)
-            options.Visible = True
-            definition = group.Definitions.Create(options)
+            # Get existing parameter bindings
+            param_bindings = doc.ParameterBindings
+            existing_binding = None
+            it = param_bindings.ForwardIterator()
 
-        binding = app.Create.NewInstanceBinding(catSet)
-        success = bindings.Insert(definition, binding)
-        if success:
-            bindings.ReInsert(definition, binding, BuiltInParameterGroup.PG_IDENTITY_DATA)
-        else:
-            TaskDialog.Show("Error", "Could not bind parameter: " + paramName)
+            while it.MoveNext():
+                defn = it.Key
+                if defn and defn.Name.lower() == param_name.lower():
+                    existing_binding = it.Current
+                    break
+
+            if existing_binding:
+                existing_cat_set = existing_binding.Categories
+                updated = False
+
+                # Add missing categories to the existing binding
+                for cat in cat_set:
+                    if not existing_cat_set.Contains(cat):
+                        existing_cat_set.Insert(cat)
+                        updated = True
+
+                if updated:
+                    doc.ParameterBindings.ReInsert(definition, existing_binding, BuiltInParameterGroup.PG_IDENTITY_DATA)
+            else:
+                # Create a new instance binding
+                new_binding = app.Create.NewInstanceBinding(cat_set)
+                success = doc.ParameterBindings.Insert(definition, new_binding, BuiltInParameterGroup.PG_IDENTITY_DATA)
+
+                if not success:
+                    TaskDialog.Show("Error", f"Could not bind parameter: {param_name}")
+
+            t.Commit()
 
 # ------------------------------
 # Main command logic
